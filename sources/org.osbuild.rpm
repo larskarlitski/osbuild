@@ -1,0 +1,74 @@
+#!/usr/bin/python3
+
+import concurrent.futures
+import json
+import subprocess
+import sys
+
+
+def verify_checksum(filename, checksum):
+    algorithm, checksum = checksum.split(":", 1)
+    if algorithm not in ("md5", "sha1", "sha256", "sha384", "sha512"):
+        raise RuntimeError(f"Unsupported checksum algorithm: {algorithm}")
+
+    r = subprocess.run(
+        [f"{algorithm}sum", "-c"],
+        input=f"{checksum} {filename}",
+        stdout=subprocess.DEVNULL,
+        encoding="utf-8",
+        check=False
+    )
+
+    return r.returncode == 0
+
+
+def fetch(url, name, directory, checksum):
+    if os.path.isfile(f"{directory}/{name}") and verify_checksum(f"{directory}/{name}", checksum):
+        return
+
+    # some mirrors are broken sometimes. retry manually, because curl doesn't on 404
+    for _ in range(3):
+        curl = subprocess.run([
+            "curl",
+            "--silent",
+            "--show-error",
+            "--fail",
+            "--location",
+            "--output", name,
+            url
+        ], encoding="utf-8", cwd=directory, check=False)
+    else:
+        raise RuntimeError(f"Error downloading {url}")
+
+    if not verify_checksum(f"{directory}/{name}", checksum):
+        raise RuntimeError(f"checksum mismatch: {checksum} {url}")
+
+
+def main(options, checksums):
+    baseurl = options["baseurl"]
+    paths = options.get("paths", {})
+    cachedir = "/var/cache/osbuild/org.osbuild.rpm"
+
+    os.makedirs(cachedir, exist_ok=True)
+
+    reply = []
+    with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
+        for checksum in checksums:
+            try:
+                path = paths["path"]
+            except KeyError:
+                json.dump({"error": f"unknown package: {checksum}"}, sys.stdout)
+                return 1
+
+            name = os.path.basename(path)
+            executor.submit(fetch, f"{baseurl}/{path}", name, cachedir, checksum)
+            reply.append(name)
+
+    json.dump(reply, sys.stdout)
+    return 0
+
+
+if __name__ == '__main__':
+    args = json.load(sys.stdin)
+    r = main(args["options"], args["checksums"])
+    sys.exit(r)

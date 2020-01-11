@@ -1,6 +1,5 @@
 #!/usr/bin/python3
 
-import concurrent.futures
 import contextlib
 import json
 import os
@@ -66,42 +65,6 @@ STAGE_OPTS = """
 RPM_CACHE_DIR = "/var/cache/org.osbuild.rpm"
 
 
-def download_package(pkg):
-    # some mirrors are broken sometimes. retry manually, because curl doesn't on 404
-    for _ in range(3):
-        curl = subprocess.run([
-            "curl",
-            "--silent",
-            "--show-error",
-            "--fail",
-            "--location",
-            "--remote-name",
-            "--write-out", "%{filename_effective}",
-            pkg["url"]
-        ], encoding="utf-8", cwd=RPM_CACHE_DIR, stdout=subprocess.PIPE, check=False)
-
-        if curl.returncode == 0:
-            filename = curl.stdout.strip()
-            break
-    else:
-        raise RuntimeError(f"Error downloading {pkg['url']}")
-
-    algorithm, checksum = pkg["checksum"].strip().split(":", 1)
-    if algorithm not in ("md5", "sha1", "sha256", "sha384", "sha512"):
-        raise RuntimeError(f"Unsupported checksum algorithm: {algorithm}")
-
-    subprocess.run(
-        [f"{algorithm}sum", "-c"],
-        cwd=RPM_CACHE_DIR,
-        input=f"{checksum} {filename}",
-        stdout=subprocess.DEVNULL,
-        encoding="utf-8",
-        check=True)
-
-
-    return filename
-
-
 def main(tree, options):
     for key in options.get("gpgkeys", []):
         with tempfile.NamedTemporaryFile(prefix="gpgkey.") as keyfile:
@@ -110,9 +73,6 @@ def main(tree, options):
             subprocess.run(["rpmkeys", "--import", keyfile.name], check=True)
 
     os.makedirs(RPM_CACHE_DIR)
-
-    with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
-        packages = executor.map(download_package, options["packages"])
 
     script = f"""
         set -e
