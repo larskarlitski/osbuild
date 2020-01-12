@@ -1,14 +1,20 @@
 %global         pypi_name osbuild
 %global         pkgdir %{_prefix}/lib/%{pypi_name}
+%global         forgeurl https://github.com/osbuild/osbuild
 
 Name:           %{pypi_name}
 Version:        7
+
+# forgemeta needs to be called after setting Version, but before using %%dist,
+# because it adds the git commit to %%dist if `commit` was defined
+%forgemeta
+
 Release:        1%{?dist}
 License:        ASL 2.0
 
 URL:            https://github.com/osbuild/osbuild
 
-Source0:        https://github.com/osbuild/%{pypi_name}/archive/%{version}.tar.gz
+Source0:        %{forgesource}
 BuildArch:      noarch
 Summary:        A build system for OS images
 
@@ -40,7 +46,7 @@ Summary:        %{summary}
 A build system for OS images
 
 %prep
-%autosetup -n %{name}-%{version}
+%forgeautosetup
 
 %build
 %py3_build
