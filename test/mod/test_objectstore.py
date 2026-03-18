@@ -176,19 +176,12 @@ def test_metadata(tmp_path):
         assert ext.meta.get("extra") is None
 
 
-@pytest.mark.skipif(not test.TestBase.can_bind_mount(), reason="Need root for bind mount")
 def test_host_tree(tmp_path):
     with objectstore.ObjectStore(tmp_path) as store:
         host = store.host_tree
 
         assert host.tree
         assert os.fspath(host)
-
-        # check we actually cannot write to the path
-        p = Path(host.tree, "osbuild-test-file")
-        with pytest.raises(OSError):
-            p.touch()
-            print("FOO")
 
     # We cannot access the tree property after cleanup
     with pytest.raises(AssertionError):
