@@ -14,6 +14,7 @@ import errno
 import json
 import os
 import subprocess
+import tempfile
 import uuid
 from typing import Any, Dict, List, NamedTuple, Optional, Tuple, Union
 
@@ -213,6 +214,7 @@ class FsCache(contextlib.AbstractContextManager, os.PathLike):
     _dirname_data = "data"
     _dirname_objects = "objects"
     _dirname_stage = "stage"
+    _dirname_tmp = "tmp"
     _filename_cache_info = "cache.info"
     _filename_cache_lock = "cache.lock"
     _filename_cache_size = "cache.size"
@@ -625,6 +627,7 @@ class FsCache(contextlib.AbstractContextManager, os.PathLike):
         dirs = [
             self._path(self._dirname_objects),
             self._path(self._dirname_stage),
+            self._path(self._dirname_tmp),
         ]
         for i in dirs:
             os.makedirs(i, exist_ok=True)
@@ -835,6 +838,17 @@ class FsCache(contextlib.AbstractContextManager, os.PathLike):
             os.unlink(path_lock)
         with ctx.suppress_oserror(errno.ENOENT, errno.ENOTDIR):
             os.rmdir(path_dir)
+
+    def tempdir(self, prefix=None, suffix=None):
+        """Create a temporary directory
+
+        Create a temporary directory in the cache's temporary area. Yields the
+        full path to that directory.
+        """
+
+        assert self._is_active()
+        dir = self._path(self._dirname_tmp)
+        return tempfile.TemporaryDirectory(dir=dir, prefix=prefix, suffix=suffix)
 
     @contextlib.contextmanager
     def stage(self):

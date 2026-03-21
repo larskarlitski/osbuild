@@ -262,7 +262,7 @@ def test_store_server(tmp_path):
         assert have.startswith(want)
 
         tmp = client.mkdtemp(suffix="suffix", prefix="prefix")
-        assert tmp.startswith(store.tmp)
+        assert tmp.startswith(os.fspath(store.cache))
         name = os.path.basename(tmp)
         assert name.startswith("prefix")
         assert name.endswith("suffix")

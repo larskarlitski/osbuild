@@ -333,10 +333,8 @@ class HostTree:
 class ObjectStore(contextlib.AbstractContextManager):
     def __init__(self, store: PathLike, read_only: bool = False):
         self.cache = FsCache("osbuild", store)
-        self.tmp = os.path.join(store, "tmp")
         os.makedirs(self.store, exist_ok=True)
         os.makedirs(self.objects, exist_ok=True)
-        os.makedirs(self.tmp, exist_ok=True)
         self._objs: Set[Object] = set()
         self._host_tree: Optional[HostTree] = None
         self._stack = contextlib.ExitStack()
@@ -395,9 +393,7 @@ class ObjectStore(contextlib.AbstractContextManager):
 
     def tempdir(self, prefix=None, suffix=None):
         """Return a tempfile.TemporaryDirectory within the store"""
-        return tempfile.TemporaryDirectory(dir=self.tmp,
-                                           prefix=prefix,
-                                           suffix=suffix)
+        return self.cache.tempdir(prefix, suffix)
 
     def get(self, object_id):
         assert self.active
