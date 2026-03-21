@@ -3,6 +3,8 @@ import contextlib
 import hashlib
 import json
 import os
+import shutil
+import subprocess
 from fnmatch import fnmatch
 from pathlib import Path
 from typing import Any, Dict, Generator, Iterable, Iterator, List, Optional
@@ -12,7 +14,7 @@ from .api import API
 from .devices import Device, DeviceManager
 from .inputs import Input, InputManager
 from .mounts import Mount, MountManager
-from .objectstore import ObjectStore
+from .objectstore import ObjectStore, ObjectFormat
 from .qemu import Qemu
 from .sources import Source
 from .util import experimentalflags, osrelease
@@ -243,8 +245,10 @@ class Stage:
             debug_break="",
             timeout=None) -> BuildResult:
         with contextlib.ExitStack() as cm:
+            tmpdir = store.tempdir(prefix="buildroot-tmp-")
+            tmpdir = cm.enter_context(tmpdir)
 
-            build_root = buildroot.BuildRoot(build_tree, runner.path, libdir, store.tmp)
+            build_root = buildroot.BuildRoot(build_tree, runner.path, libdir, tmpdir)
             cm.enter_context(build_root)
 
             # if we have a build root, then also bind-mount the boot
@@ -253,9 +257,6 @@ class Stage:
 
             # drop capabilities other than `DEFAULT_CAPABILITIES`
             build_root.caps = DEFAULT_CAPABILITIES | self.info_caps
-
-            tmpdir = store.tempdir(prefix="buildroot-tmp-")
-            tmpdir = cm.enter_context(tmpdir)
 
             rundir = os.path.join(tmpdir, "run")
             os.makedirs(rundir)
@@ -420,13 +421,22 @@ class Pipeline:
             self.assembler.base = stage.id
         return stage
 
-    def build_stages(self, object_store, monitor, libdir,
+    def _stages_to_build(self, store):
+        base = None
+        todo = []
+
+        for stage in reversed(self.stages):
+            base = store.get(stage.id)
+            if base:
+                break
+            todo.append(stage)
+
+        todo.reverse()
+        return base, todo
+
+    def build_stages(self, stages, base, object_store, monitor, libdir,
                      debug_break="", stage_timeout=None, in_vm=False):
         results = {"success": True, "name": self.name}
-
-        # If there are no stages, just return here
-        if not self.stages:
-            return results
 
         # Check if the tree that we are supposed to build does
         # already exist. If so, short-circuit here
@@ -452,14 +462,8 @@ class Pipeline:
         # already exists in the store and use that as the base.
         tree = object_store.new(self.id)
         tree.source_epoch = self.source_epoch
-
-        todo = collections.deque()
-        for stage in reversed(self.stages):
-            base = object_store.get(stage.id)
-            if base:
-                tree.init(base)
-                break
-            todo.append(stage)  # append right side of the deque
+        if base:
+            tree.init(base)
 
         # If two run() calls race each-other, two trees will get built
         # and it is nondeterministic which of them will end up
@@ -486,9 +490,7 @@ class Pipeline:
                 qemu.monitored_request(monitor, "update_store",
                                        floating=object_store.export_floating())
 
-            while todo:
-                stage = todo.pop()
-
+            for stage in stages:
                 monitor.stage(stage)
 
                 with tree.meta.write(stage.id) as meta:
@@ -529,17 +531,75 @@ class Pipeline:
 
         return results
 
+    def _build_stages_unshared(self, stages, base, store, monitor, libdir):
+        if self.build:
+            o = store.get(self.build, ObjectFormat.ARCHIVE)
+            build = o.archive
+        else:
+            build = None
+
+        with store.tempdir(prefix="pipeline-result-") as workdir:
+            args = {
+                "storedir": store.store,
+                "libdir": libdir,
+                "build": build,
+                "runner": self.runner.to_dict(libdir),
+                "base": base.archive if base else None,
+                "stages": [ s.to_dict(libdir) for s in stages ],
+                "workdir": workdir
+            }
+
+            r = subprocess.run([
+                "unshare", "-r", "--map-users=auto", "--map-groups=auto", "--",
+                os.path.join(libdir, "osbuild/build_stages_unshared.py")
+            ], input=json.dumps(args), text=True, env={ "PYTHONPATH": libdir })
+
+            if r.returncode != 0:
+                return { "name": self.name, "success": false }
+
+            with open(os.path.join(workdir, "results.json")) as f:
+                stage_results = json.load(f)
+
+            results = {
+                "name": self.name,
+                "success": all(r["success"] for r in stage_results),
+                "stages": [BuildResult.from_dict(r) for r in stage_results]
+            }
+
+            if not results["success"]:
+                return results
+
+            o = store.new(self.id, ObjectFormat.ARCHIVE)
+            o.source_epoch = self.source_epoch
+            os.rename(os.path.join(workdir, "tree.tar"), o.archive)
+            shutil.copytree(os.path.join(workdir, "meta"), os.path.join(o.path, "meta"), dirs_exist_ok=True)
+            o.finalize()
+
+            if stages[-1].checkpoint:
+                store.commit(o, o.id)
+
+            return results
+
+
     def run(self, store, monitor, libdir, debug_break="", stage_timeout=None, in_vm=False):
+        base, stages = self._stages_to_build(store)
+        if not stages:
+            return {"success": True, "name": self.name}
 
         self.run_in_vm = in_vm
         monitor.begin(self)
 
-        results = self.build_stages(store,
-                                    monitor,
-                                    libdir,
-                                    debug_break,
-                                    stage_timeout,
-                                    in_vm)
+        if os.geteuid() == 0:
+            results = self.build_stages(stages,
+                                        base,
+                                        store,
+                                        monitor,
+                                        libdir,
+                                        debug_break,
+                                        stage_timeout,
+                                        in_vm)
+        else:
+            results = self._build_stages_unshared(stages, base, store, monitor, libdir)
 
         monitor.finish(results)
 
