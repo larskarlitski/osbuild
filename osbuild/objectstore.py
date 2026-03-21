@@ -32,6 +32,11 @@ class PathAdapter:
         return getattr(self.obj, self.attr)
 
 
+class ObjectFormat(enum.IntEnum):
+    DIRECTORY = 0
+    ARCHIVE = 1
+
+
 class Object:
     class Mode(enum.IntEnum):
         READ = 0
@@ -108,9 +113,11 @@ class Object:
         def __fspath__(self):
             return self.path
 
-    def __init__(self, cache: FsCache, uid: str, mode: Mode):
+    def __init__(self, cache: FsCache, uid: str, mode: Mode,
+                 format: ObjectFormat = ObjectFormat.DIRECTORY):
         self._cache = cache
         self._mode = mode
+        self._format = format
         self._id = uid
         self._path = None
         self._meta: Optional[Object.Metadata] = None
@@ -128,7 +135,8 @@ class Object:
             self._cache.stage()
         )
         self._path = os.path.join(self._cache, name)
-        os.makedirs(os.path.join(self._path, "tree"))
+        if self._format == ObjectFormat.DIRECTORY:
+            os.makedirs(os.path.join(self._path, "tree"))
 
     def to_dict(self):
         return {
@@ -186,6 +194,7 @@ class Object:
         self._check_mode(Object.Mode.WRITE)
         assert self.active
         assert self._path
+        assert base._format == ObjectFormat.DIRECTORY
 
         subprocess.run(
             [
@@ -206,7 +215,13 @@ class Object:
 
     @property
     def tree(self) -> str:
+        assert self._format == ObjectFormat.DIRECTORY, "Object not stored as a directory"
         return os.path.join(self.path, "tree")
+
+    @property
+    def archive(self) -> str:
+        assert self._format == ObjectFormat.ARCHIVE, "Object not stored as a tar archive"
+        return os.path.join(self.path, "tree.tar")
 
     @property
     def meta(self) -> Metadata:
@@ -261,6 +276,11 @@ class Object:
 
     def export(self, to_directory: PathLike, skip_preserve_owner=False):
         """Copy object into an external directory"""
+        if self._format == ObjectFormat.DIRECTORY:
+            source = os.fspath(self.tree) + "/."
+        else:
+            source = os.fspath(self.archive)
+
         cp_cmd = [
             "cp",
             "--reflink=auto",
@@ -269,7 +289,7 @@ class Object:
         if skip_preserve_owner:
             cp_cmd += ["--no-preserve=ownership"]
         cp_cmd += [
-            os.fspath(self.tree) + "/.",
+            source,
             os.fspath(to_directory),
         ]
         subprocess.run(cp_cmd, check=True)
@@ -395,7 +415,7 @@ class ObjectStore(contextlib.AbstractContextManager):
         """Return a tempfile.TemporaryDirectory within the store"""
         return self.cache.tempdir(prefix, suffix)
 
-    def get(self, object_id):
+    def get(self, object_id, format: ObjectFormat = ObjectFormat.DIRECTORY):
         assert self.active
 
         obj = self._get_floating(object_id)
@@ -403,13 +423,13 @@ class ObjectStore(contextlib.AbstractContextManager):
             return obj
 
         try:
-            obj = Object(self.cache, object_id, Object.Mode.READ)
+            obj = Object(self.cache, object_id, Object.Mode.READ, format)
             self._stack.enter_context(obj)
             return obj
         except FsCache.MissError:
             return None
 
-    def new(self, object_id: str):
+    def new(self, object_id: str, format: ObjectFormat = ObjectFormat.DIRECTORY):
         """Creates a new `Object` and open it for writing.
 
         It returns a instance of `Object` that can be used to
@@ -419,7 +439,7 @@ class ObjectStore(contextlib.AbstractContextManager):
         assert self.active
         self._ensure_writable()
 
-        obj = Object(self.cache, object_id, Object.Mode.WRITE)
+        obj = Object(self.cache, object_id, Object.Mode.WRITE, format)
         self._stack.enter_context(obj)
 
         self._objs.add(obj)
